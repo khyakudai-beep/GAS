@@ -1,0 +1,8 @@
+# デフォルト除外
+**/**
+
+# push 対象のみ許可
+!appsscript.json
+!*.gs
+!*.js
+!*.html
