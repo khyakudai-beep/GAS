@@ -6,9 +6,11 @@
 //  - 対象シート        : 「リプレイス用」
 //  - 起票条件          : 「Jiraチケット管理番号」が空 かつ 「送り状」に値あり
 //  - チケットタイトル  : 固定「株式会社GA technologies:リプレイス依頼」
-//  - 「新端末の発送日」→ customfield_10038（および duedate に同値を設定）
-//  - 依頼種別(10301)/PC種別(10268) は送信しない
-//  - クライアント名(10036)/opskey(10202)/担当者自動割当 は維持
+//  - 起票先プロジェクト   : JOM / issuetype 12313（Josys Service Request）
+//  - 「新端末の発送日」→ customfield_14981（および duedate に同値を設定）
+//  - 依頼種別/PC種別 は送信しない
+//  - 企業名(14986)/opskey(14987)/担当者自動割当 は維持
+//  - 新端末の発送日が実行日より前なら起票直後に「完了」へ遷移（transition id:51）
 //  - チケット番号の出力（HYPERLINK）・ヘッダー行検出は既存踏襲
 //  - Phase複数チケット生成ロジック（ディアーズブレイン様向け）は除去（1行=1チケット）
 //  - ヘッダー名照合は改行/空白を無視する正規化マッチに変更（セル内改行対応）
@@ -21,9 +23,10 @@
 // JIRA関連設定
 const JIRA_CONFIG = {
   BASE_URL: 'https://josys-outsource.atlassian.net',
-  PROJECT_NAME: 'ITO',
-  ISSUE_TYPE_STORY: '10007',
-  ISSUE_TYPE_STORY_CHILD: '10013'
+  PROJECT_NAME: 'JOM',
+  ISSUE_TYPE_STORY: '12313',          // Josys Service Request
+  ISSUE_TYPE_STORY_CHILD: '10013',    // ※現状未使用（Phase生成ロジックは除去済み）
+  DONE_TRANSITION_ID: '51'            // 「完了」への遷移ID
 };
 
 // スプレッドシート関連設定
@@ -49,7 +52,7 @@ const HEADER_CONFIG = {
   COLUMN_MAPPING: {
     TICKET_NUMBER: 'Jiraチケット管理番号',  // 完全一致（正規化後）：起票済み判定＆リンク出力先
     SHIPPING: '送り状',                     // 部分一致（正規化後）：起票トリガー
-    SHIPPING_DATE: '新端末の発送日'          // 完全一致（正規化後）：customfield_10038 / duedate
+    SHIPPING_DATE: '新端末の発送日'          // 完全一致（正規化後）：customfield_14981 / duedate
   }
 };
 
@@ -64,9 +67,9 @@ const MEMBER_CONFIG = {
 
 // カスタムフィールド設定
 const CUSTOM_FIELDS = {
-  CLIENT_NAME: 'customfield_10036',    // クライアント名（A1）
-  OPSKEY: 'customfield_10202',         // opskey（C1の値）
-  SHIPPING_DATE: 'customfield_10038'   // 新端末の発送日
+  CLIENT_NAME: 'customfield_14986',    // 企業名（クライアント名 A1）
+  OPSKEY: 'customfield_14987',         // Opskey（C1の値）
+  SHIPPING_DATE: 'customfield_14981'   // 新端末の発送日（duedate にも同値を設定）
 };
 
 // =============================================================================
@@ -687,6 +690,19 @@ function createStory(storySheet, sheetURL) {
                     url: JIRA_CONFIG.BASE_URL + '/browse/' + ret['key']
                 });
 
+                // 新端末の発送日が実行日より前の日付なら、起票直後に「完了」へ遷移
+                //   shippingDate は 'yyyy-MM-dd'（発送日未入力時は当日）→ 当日==当日は遷移しない
+                var todayStr = Utilities.formatDate(new Date(), 'JST', 'yyyy-MM-dd');
+                if (shippingDate < todayStr) {
+                    try {
+                        transitionIssue(ret['key'], JIRA_CONFIG.DONE_TRANSITION_ID);
+                        Logger.log('発送日(' + shippingDate + ')が実行日(' + todayStr + ')より前のため「完了」へ遷移しました: ' + ret['key']);
+                    } catch (transitionError) {
+                        Logger.log('完了遷移エラー (' + ret['key'] + '): ' + transitionError.message);
+                        // 遷移に失敗してもチケット自体は作成済みなので処理は続行
+                    }
+                }
+
                 // 作成されたチケットのハイパーリンクを設定（既存踏襲）
                 if (columnIndexes.TICKET_NUMBER >= 0 && createdTickets.length > 0) {
                     var ticketRowNumber = i + 1;
@@ -852,9 +868,31 @@ function postStoryIssue(json) {
 }
 
 /**
+ * 指定チケットを指定transitionIdで遷移させる（例: 「完了」へ遷移）
+ * transitions API は成功時 204 No Content を返す。
+ */
+function transitionIssue(issueKey, transitionId) {
+    var requestUrl = JIRA_CONFIG.BASE_URL + '/rest/api/2/issue/' + issueKey + '/transitions';
+    var payload = JSON.stringify({ "transition": { "id": String(transitionId) } });
+    var options = {
+        method: 'post',
+        payload: payload,
+        contentType: 'application/json',
+        headers: { 'Authorization': ' Basic ' + token },
+        muteHttpExceptions: true
+    };
+    var response = UrlFetchApp.fetch(requestUrl, options);
+    var responseCode = response.getResponseCode();
+    if (responseCode != 204) {
+        throw new Error('遷移エラーが発生しました(code:' + responseCode + ' responseBody:' + response.getContentText() + ')');
+    }
+    return true;
+}
+
+/**
  * リプレイス依頼用 Story起票JSON生成
- * 依頼種別(10301)/PC種別(10268)は送信しない。
- * クライアント名(10036)/opskey(10202)/新端末の発送日(10038)を設定。
+ * 依頼種別/PC種別は送信しない。
+ * 企業名(14986)/Opskey(14987)/新端末の発送日(14981・duedateにも同値)を設定。
  */
 function getStoryIssueJson(summary, description, dueDate, clientName, customFieldValue, shippingDate, assigneeAccountId) {
     Logger.log("設定するクライアントネームは" + clientName)
