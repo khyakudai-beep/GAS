@@ -40,7 +40,8 @@ const SHEET_CONFIG = {
 
 // リプレイス依頼 固有設定
 const REPLACE_CONFIG = {
-  TICKET_TITLE: '株式会社GA technologies:リプレイス依頼'  // チケットタイトル（固定）
+  TICKET_TITLE: '株式会社GA technologies:リプレイス依頼',  // チケットタイトル（固定）
+  TASK_TYPE_VALUE: 'キッティング（PC）'                    // タスク種別（customfield_15004）へ出力する固定値
 };
 
 // ヘッダー検出設定
@@ -69,7 +70,8 @@ const MEMBER_CONFIG = {
 const CUSTOM_FIELDS = {
   CLIENT_NAME: 'customfield_14986',    // 企業名（クライアント名 A1）
   OPSKEY: 'customfield_14987',         // Opskey（C1の値）
-  SHIPPING_DATE: 'customfield_14981'   // 新端末の発送日（duedate にも同値を設定）
+  SHIPPING_DATE: 'customfield_14981',  // 新端末の発送日（duedate にも同値を設定）
+  TASK_TYPE: 'customfield_15004'       // タスク種別（Checkboxes型）
 };
 
 // =============================================================================
@@ -902,7 +904,9 @@ function getStoryIssueJson(summary, description, dueDate, clientName, customFiel
             "duedate": dueDate,
             [CUSTOM_FIELDS.CLIENT_NAME]: clientName,          // クライアント名
             [CUSTOM_FIELDS.OPSKEY]: customFieldValue,         // opskey（C1の値）
-            [CUSTOM_FIELDS.SHIPPING_DATE]: shippingDate       // 新端末の発送日
+            [CUSTOM_FIELDS.SHIPPING_DATE]: shippingDate,      // 新端末の発送日
+            // タスク種別（Checkboxes型）：リプレイス依頼は固定で「キッティング（PC）」
+            [CUSTOM_FIELDS.TASK_TYPE]: [{ "value": REPLACE_CONFIG.TASK_TYPE_VALUE }]
         }
     }
 
