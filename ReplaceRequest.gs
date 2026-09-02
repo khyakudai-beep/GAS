@@ -42,7 +42,7 @@ const REPLACE_CONFIG = {
 
 // ヘッダー検出設定
 const HEADER_CONFIG = {
-  KEY_COLUMN: 'B',                              // ヘッダー検索の基準列
+  KEY_COLUMN: 'A',                              // ヘッダー検索の基準列
   KEY_VALUE: 'No.',                             // 検索するキー値
   DATA_START_COLUMN_NAME: 'Jiraチケット管理番号',  // description生成の開始基準カラム名
   // 動的カラム検索設定（照合は正規化マッチ：改行/空白を無視）
