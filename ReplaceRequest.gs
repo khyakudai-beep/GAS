@@ -914,3 +914,40 @@ function checkOpskey(opskey) {
     assigneeId: assigneeId || "見つかりません"
   };
 }
+
+// =============================================================================
+// テスト用ラッパー（GASエディタの「実行」ボタンから引数なしで実行）
+// =============================================================================
+
+/**
+ * リプレイス起票テスト
+ * 使い方:
+ *  1) 下の TEST_SHEET_ID / TEST_SHEET_URL に対象スプレッドシートの値を入力
+ *  2) エディタ上部の関数プルダウンで「testReplaceIssue」を選び「実行」
+ *  3) 実行ログ（表示 → ログ）で結果を確認
+ *
+ * ⚠️ 実際にJiraチケットが作成されます。
+ *    「リプレイス用」シートで【送り状に値あり かつ Jiraチケット管理番号が空】の行が
+ *    起票対象です。テストでは該当行を1行だけにしておくと1件だけ発行されます。
+ */
+function testReplaceIssue() {
+  // ↓↓↓ ここに入力してください ↓↓↓
+  var TEST_SHEET_ID  = '';  // スプレッドシートのID（URLの /d/【ここ】/edit 部分）
+  var TEST_SHEET_URL = '';  // スプレッドシートのURL（description末尾に付与されます）
+  // ↑↑↑ ここに入力してください ↑↑↑
+
+  if (!TEST_SHEET_ID || !TEST_SHEET_URL) {
+    Logger.log('【設定待ち】TEST_SHEET_ID と TEST_SHEET_URL を入力してから実行してください。');
+    return;
+  }
+
+  count = 0;  // 念のため作成件数カウンタを初期化
+  Logger.log('=== リプレイス起票テスト開始 ===');
+  Logger.log('対象シート名: ' + SHEET_CONFIG.REQUEST_SHEET_NAME);
+  Logger.log('対象スプレッドシートID: ' + TEST_SHEET_ID);
+
+  // targetSheetName を省略 → 既定の「リプレイス用」が使われる
+  kittingRequest(TEST_SHEET_ID, TEST_SHEET_URL);
+
+  Logger.log('=== リプレイス起票テスト終了 === 作成件数 count=' + count);
+}
