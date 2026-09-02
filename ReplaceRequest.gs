@@ -721,31 +721,16 @@ function createStory(storySheet, sheetURL) {
                     }
                 }
 
-                // 作成されたチケットのハイパーリンクを設定（既存踏襲）
+                // 作成したチケット番号を「即座に」シートへ書き戻す
+                //   ※ ループ末尾での一括書き戻しだと、途中でキャンセル/エラーになった場合に
+                //     Jiraにはチケットが作られたのにシートは空のまま残り、再実行で重複起票になる。
+                //     それを防ぐため 1件作成するたびに書き込み＆flushして確定させる。
                 if (columnIndexes.TICKET_NUMBER >= 0 && createdTickets.length > 0) {
-                    var ticketRowNumber = i + 1;
-                    var ticketColumnNumber = columnIndexes.TICKET_NUMBER + 1;
-
-                    if (createdTickets.length === 1) {
-                        // 単一チケットの場合: 通常のHYPERLINK関数
-                        var ticket = createdTickets[0];
-                        var hyperLinkFormula = '=HYPERLINK("' + ticket.url + '","' + ticket.key + '")';
-
-                        hyperlinkUpdates.push({
-                            row: ticketRowNumber,
-                            column: ticketColumnNumber,
-                            formula: hyperLinkFormula,
-                            ticketKeys: [ticket.key]
-                        });
-                    } else {
-                        // 複数チケットの場合: リッチテキスト形式で各行にリンクを設定
-                        hyperlinkUpdates.push({
-                            row: ticketRowNumber,
-                            column: ticketColumnNumber,
-                            tickets: createdTickets,
-                            isMultiple: true
-                        });
-                    }
+                    var ticket = createdTickets[0];
+                    var cell = storySheet.getRange(i + 1, columnIndexes.TICKET_NUMBER + 1);
+                    cell.setFormula('=HYPERLINK("' + ticket.url + '","' + ticket.key + '")');
+                    SpreadsheetApp.flush(); // この行の記録を即時確定（重複防止の要）
+                    Logger.log('行' + (i + 1) + ' にチケット番号を書き戻し: ' + ticket.key);
                 }
 
                 count++
