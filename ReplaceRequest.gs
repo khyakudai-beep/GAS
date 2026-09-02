@@ -666,16 +666,23 @@ function createStory(storySheet, sheetURL) {
                           data[i][columnIndexes.SHIPPING] !== undefined &&
                           data[i][columnIndexes.SHIPPING].toString().trim().length > 0;
 
+        // 起票条件③ 「新端末の発送日」に値がある
+        var hasShippingDate = columnIndexes.SHIPPING_DATE >= 0 &&
+                              data[i][columnIndexes.SHIPPING_DATE] !== null &&
+                              data[i][columnIndexes.SHIPPING_DATE] !== undefined &&
+                              data[i][columnIndexes.SHIPPING_DATE].toString().trim().length > 0;
+
         // ▼診断ログ：送り状のある候補行について、チケット番号セルの中身と判定を出力
         if (hasShipping) {
             var tnRaw = columnIndexes.TICKET_NUMBER >= 0 ? data[i][columnIndexes.TICKET_NUMBER] : '(列未検出)';
             Logger.log('【診断】行' + (i + 1) + ': チケット番号セル="' + tnRaw +
                        '" (型:' + typeof tnRaw + ') → 空判定=' + ticketNumberEmpty +
-                       ' / 送り状あり=' + hasShipping);
+                       ' / 送り状あり=' + hasShipping +
+                       ' / 発送日あり=' + hasShippingDate);
         }
 
-        // チケット番号が空 & 送り状に値がある場合
-        if (ticketNumberEmpty && hasShipping) {
+        // チケット番号が空 かつ 送り状に値あり かつ 新端末の発送日に値あり の場合のみ起票
+        if (ticketNumberEmpty && hasShipping && hasShippingDate) {
 
             // チケットタイトルは固定
             summary = REPLACE_CONFIG.TICKET_TITLE
