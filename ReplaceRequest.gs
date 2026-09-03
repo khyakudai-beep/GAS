@@ -71,7 +71,23 @@ const CUSTOM_FIELDS = {
   CLIENT_NAME: 'customfield_14986',    // 企業名（クライアント名 A1）
   OPSKEY: 'customfield_14987',         // Opskey（C1の値）
   SHIPPING_DATE: 'customfield_14981',  // 新端末の発送日（duedate にも同値を設定）
+                                       //   ※createmeta実測では 14981 の正式名は「完了日」。
+                                       //     本来の「発送日」は customfield_12024。要確認事項。
+  COMPLETION_DATE: 'customfield_14981',// 完了日（リースアップ返却で使用・日付）
   TASK_TYPE: 'customfield_15004'       // タスク種別（Checkboxes型）
+};
+
+// リースアップ返却 起票 固有設定
+const LEASEUP_CONFIG = {
+  REQUEST_SHEET_NAME: 'リースアップ用',                        // 対象シート名
+  // タイトルはリプレイス用タイトルの「リプレイス」を「リースアップ返却」に置換したもの
+  TICKET_TITLE: '株式会社GA technologies:リースアップ返却依頼',
+  TASK_TYPE_VALUES: ['受領', '初期化', '発送のみ'],           // customfield_15004 へ固定で入れる値
+  COLUMN_MAPPING: {
+    TICKET_NUMBER: 'Jiraチケット管理番号',  // A列：起票トリガー（空の行が対象）＆リンク出力先
+    ASSET: 'josys取得',                     // B列：資産（空白行の誤起票防止判定に使用）
+    DATE: 'date'                            // C列：完了日(customfield_14981)へ出力
+  }
 };
 
 // =============================================================================
@@ -882,6 +898,158 @@ function transitionIssue(issueKey, transitionId) {
     return true;
 }
 
+// =============================================================================
+// リースアップ返却 起票処理
+//   対象シート「リースアップ用」（列: A=Jiraチケット管理番号 / B=josys取得 / C=date）
+//   ・起票条件 : A列（Jiraチケット管理番号）が空の行（空白行の誤起票防止のため
+//               josys取得 または date に値がある行のみ）
+//   ・送信値   : タスク種別(15004)=受領/初期化/発送のみ（固定）、完了日(14981)=C列 date
+//   ・タイトル : 「株式会社GA technologies:リースアップ返却依頼」
+//   ・作成後   : A列にHYPERLINKを即時書き戻し → 無条件で「完了」へ遷移(id 51)
+// =============================================================================
+
+/**
+ * リースアップ返却 起票エントリポイント
+ * @param {string} sheetId          対象スプレッドシートID
+ * @param {string} sheetURL         スプレッドシートURL（現状未使用・将来用）
+ * @param {string} targetSheetName  対象シート名（省略時は「リースアップ用」）
+ */
+function leaseUpRequest(sheetId, sheetURL, targetSheetName) {
+    targetSheetName = targetSheetName || LEASEUP_CONFIG.REQUEST_SHEET_NAME;
+    try {
+        var spreadsheet = SpreadsheetApp.openById(sheetId);
+        var sheet = spreadsheet.getSheetByName(targetSheetName);
+        if (!sheet) {
+            console.log('対象シートが見つかりません: ' + targetSheetName);
+            return;
+        }
+        var created = createLeaseUpStory(sheet);
+        if (created > 0) {
+            console.log('リースアップ返却: ' + created + '件の依頼を送信しました。');
+        } else {
+            console.log('リースアップ返却: 送信条件に当てはまる行がありません。');
+        }
+    } catch (e) {
+        console.log('システムエラーを検知しました。');
+        console.log('エラー内容：' + e.message);
+    }
+}
+
+function createLeaseUpStory(sheet) {
+    var lastRow = sheet.getLastRow();
+    var lastColumn = sheet.getLastColumn();
+    if (lastRow < 1 || lastColumn < 1) {
+        Logger.log('リースアップ: シートにデータがありません');
+        return 0;
+    }
+    var data = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+
+    var normalize = function (s) { return s == null ? '' : s.toString().replace(/[\s　]/g, ''); };
+    var targetTicket = normalize(LEASEUP_CONFIG.COLUMN_MAPPING.TICKET_NUMBER);
+    var targetAsset  = normalize(LEASEUP_CONFIG.COLUMN_MAPPING.ASSET);
+    var targetDate   = normalize(LEASEUP_CONFIG.COLUMN_MAPPING.DATE);
+
+    // ヘッダー行と各列を検出（「Jiraチケット管理番号」を含む行をヘッダーとみなす）
+    var headerRow = -1, ticketCol = -1, assetCol = -1, dateCol = -1;
+    for (var r = 0; r < data.length && headerRow === -1; r++) {
+        for (var c = 0; c < data[r].length; c++) {
+            if (normalize(data[r][c]) === targetTicket) { headerRow = r; ticketCol = c; break; }
+        }
+    }
+    if (headerRow === -1) {
+        throw new Error('「Jiraチケット管理番号」ヘッダーが見つかりませんでした');
+    }
+    for (var c2 = 0; c2 < data[headerRow].length; c2++) {
+        var hv = normalize(data[headerRow][c2]);
+        if (hv === targetAsset) assetCol = c2;
+        if (hv === targetDate)  dateCol = c2;
+    }
+    Logger.log('リースアップ ヘッダー行=' + (headerRow + 1) +
+               ' / TICKET列=' + (ticketCol + 1) +
+               ' / ASSET列=' + (assetCol + 1) +
+               ' / DATE列=' + (dateCol + 1));
+
+    var summary = LEASEUP_CONFIG.TICKET_TITLE;
+    var createdCount = 0;
+
+    for (var i = headerRow + 1; i < data.length; i++) {
+        // 起票条件：Jiraチケット管理番号が空
+        var ticketEmpty = data[i][ticketCol] === null ||
+                          data[i][ticketCol] === undefined ||
+                          data[i][ticketCol].toString().trim().length === 0;
+
+        // 空白行の誤起票防止：josys取得 または date に値がある行のみ対象
+        var hasAsset = assetCol >= 0 && data[i][assetCol] != null && data[i][assetCol].toString().trim().length > 0;
+        var hasDate  = dateCol  >= 0 && data[i][dateCol]  != null && data[i][dateCol].toString().trim().length > 0;
+
+        if (ticketEmpty && (hasAsset || hasDate)) {
+            var completionDate = dateCol >= 0 ? formatDateOrNull(data[i][dateCol]) : null;
+
+            try {
+                var ret = postStoryIssue(getLeaseUpIssueJson(summary, completionDate));
+                Logger.log('リースアップ起票成功: ' + ret['key']);
+
+                // チケット番号を即時書き戻し（重複防止の要）
+                var url = JIRA_CONFIG.BASE_URL + '/browse/' + ret['key'];
+                sheet.getRange(i + 1, ticketCol + 1).setFormula('=HYPERLINK("' + url + '","' + ret['key'] + '")');
+                SpreadsheetApp.flush();
+                Logger.log('行' + (i + 1) + ' にチケット番号を書き戻し: ' + ret['key']);
+
+                // 起票 → 完了 へ無条件で自動遷移
+                try {
+                    transitionIssue(ret['key'], JIRA_CONFIG.DONE_TRANSITION_ID);
+                    Logger.log('「完了」へ遷移しました: ' + ret['key']);
+                } catch (transitionError) {
+                    Logger.log('完了遷移エラー (' + ret['key'] + '): ' + transitionError.message);
+                }
+
+                createdCount++;
+            } catch (error) {
+                Logger.log('リースアップ起票エラー (行' + (i + 1) + '): ' + error.message);
+            }
+        }
+    }
+    return createdCount;
+}
+
+/**
+ * リースアップ返却用 起票JSON生成
+ *   summary / project / issuetype（必須）＋ タスク種別(15004) ＋ 完了日(14981)
+ */
+function getLeaseUpIssueJson(summary, completionDate) {
+    var fields = {
+        "summary": summary,
+        "project":   { "key": JIRA_CONFIG.PROJECT_NAME },
+        "issuetype": { "id": JIRA_CONFIG.ISSUE_TYPE_STORY },
+        // タスク種別（Checkboxes）：受領・初期化・発送のみ（固定）
+        [CUSTOM_FIELDS.TASK_TYPE]: LEASEUP_CONFIG.TASK_TYPE_VALUES.map(function (v) {
+            return { "value": v };
+        })
+    };
+    // 完了日（customfield_14981・日付）。date列が空/解釈不能なら送らない
+    if (completionDate) {
+        fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
+    }
+    return JSON.stringify({ "update": {}, "fields": fields });
+}
+
+/**
+ * 日付値を 'yyyy-MM-dd'（JST）へ整形。Date型・文字列に対応。
+ * 空/解釈不能なら null を返す（デフォルト当日にはフォールバックしない）。
+ */
+function formatDateOrNull(rawValue) {
+    if (rawValue === null || rawValue === undefined || rawValue.toString().trim() === '') return null;
+    if (isDate(rawValue)) return Utilities.formatDate(rawValue, 'JST', 'yyyy-MM-dd');
+    var str = String(rawValue).trim();
+    var m = str.match(/(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+    if (m) {
+        var dt = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        if (!isNaN(dt.getTime())) return Utilities.formatDate(dt, 'JST', 'yyyy-MM-dd');
+    }
+    Logger.log('警告: date「' + str + '」を日付として解釈できませんでした（完了日は送信しません）');
+    return null;
+}
+
 /**
  * リプレイス依頼用 Story起票JSON生成
  * 依頼種別/PC種別は送信しない。
@@ -983,4 +1151,35 @@ function testReplaceIssue() {
   kittingRequest(TEST_SHEET_ID, TEST_SHEET_URL);
 
   Logger.log('=== リプレイス起票テスト終了 === 作成件数 count=' + count);
+}
+
+/**
+ * リースアップ返却テスト
+ * 使い方:
+ *  1) 下の TEST_SHEET_ID に対象スプレッドシートのIDを入力
+ *  2) 関数プルダウンで「testLeaseUpIssue」を選び「実行」
+ *  3) 実行ログで結果を確認
+ *
+ * ⚠️ 実際にJiraチケットが作成され、作成後すぐ「完了」へ遷移します。
+ *    「リースアップ用」シートで Jiraチケット管理番号(A列)が空 かつ
+ *    josys取得 または date に値がある行が起票対象です（テストは1行だけに絞ると安全）。
+ */
+function testLeaseUpIssue() {
+  // ↓↓↓ ここに入力してください ↓↓↓
+  var TEST_SHEET_ID = '';  // スプレッドシートのID（URLの /d/【ここ】/edit 部分）
+  // ↑↑↑ ここに入力してください ↑↑↑
+
+  if (!TEST_SHEET_ID) {
+    Logger.log('【設定待ち】TEST_SHEET_ID を入力してから実行してください。');
+    return;
+  }
+
+  Logger.log('=== リースアップ返却テスト開始 ===');
+  Logger.log('対象シート名: ' + LEASEUP_CONFIG.REQUEST_SHEET_NAME);
+  Logger.log('対象スプレッドシートID: ' + TEST_SHEET_ID);
+
+  // targetSheetName を省略 → 既定の「リースアップ用」が使われる
+  leaseUpRequest(TEST_SHEET_ID, '');
+
+  Logger.log('=== リースアップ返却テスト終了 ===');
 }
