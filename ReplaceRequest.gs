@@ -93,6 +93,21 @@ const LEASEUP_CONFIG = {
   }
 };
 
+// 退職休職リスト 起票 固有設定
+const OFFBOARD_CONFIG = {
+  REQUEST_SHEET_NAME: '退職休職リスト',       // 対象シート名
+  TITLE_SUFFIX: '：退職休職対応',             // タイトル = 会社名 + この接尾辞（固定）
+  EMAIL_TASK_TYPE: 'SaaS削除',               // メールアドレス由来チケットのタスク種別
+  EMAIL_TICKET_COUNT: 2,                     // メールアドレスに値があれば作成する枚数
+  COLUMN_MAPPING: {
+    TICKET_NUMBER: 'Jiraチケット管理番号',  // A列：起票トリガー（空）＆リンク出力先
+    REQUEST_TYPE: '依頼種別',               // F列：起票トリガー（値あり）
+    EMAIL: 'ﾒｰﾙｱﾄﾞﾚｽ',                       // J列：値あり→SaaS削除チケット×2
+    LAST_DAY: '最終出社日',                  // Q列：完了日(14981)/duedate（シリアル値変換）
+    DEVICE: 'ﾃﾞﾊﾞｲｽ'                         // W列：値あり→デバイスチケット×1（種別算出）
+  }
+};
+
 // =============================================================================
 // システム変数 - 通常は変更不要
 // =============================================================================
@@ -1058,6 +1073,250 @@ function formatDateOrNull(rawValue) {
     return null;
 }
 
+// =============================================================================
+// 退職休職リスト 起票処理
+//   対象シート「退職休職リスト」
+//   ・起票条件 : Jiraチケット管理番号(A列)が空 かつ 依頼種別(F列)に値がある行
+//   ・1行あたり最大3チケット:
+//       - ﾒｰﾙｱﾄﾞﾚｽ(J列)に値 → SaaS削除チケットを2枚
+//       - ﾃﾞﾊﾞｲｽ(W列)に値   → デバイスチケットを1枚（タスク種別を算出）
+//   ・完了日(14981)/duedate = 最終出社日(Q列)。45322 のようなシリアル値は日付へ変換
+//   ・企業名(14986)/opskey(14987) = シート上部の会社行から取得
+//   ・タイトル = 会社名 + 「：退職休職対応」
+//   ・作成後 : A列に全チケットのリンクを書き戻し → 各チケットを「完了」へ遷移(id 51)
+// =============================================================================
+
+/**
+ * 退職休職リスト 起票エントリポイント
+ */
+function offboardRequest(sheetId, sheetURL, targetSheetName) {
+    targetSheetName = targetSheetName || OFFBOARD_CONFIG.REQUEST_SHEET_NAME;
+    try {
+        var spreadsheet = SpreadsheetApp.openById(sheetId);
+        var sheet = spreadsheet.getSheetByName(targetSheetName);
+        if (!sheet) {
+            console.log('対象シートが見つかりません: ' + targetSheetName);
+            return;
+        }
+        var created = createOffboardStories(sheet);
+        if (created > 0) {
+            console.log('退職休職: ' + created + '件のチケットを作成しました。');
+        } else {
+            console.log('退職休職: 送信条件に当てはまる行がありません。');
+        }
+    } catch (e) {
+        console.log('システムエラーを検知しました。');
+        console.log('エラー内容：' + e.message);
+    }
+}
+
+function createOffboardStories(sheet) {
+    var lastRow = sheet.getLastRow();
+    var lastColumn = sheet.getLastColumn();
+    if (lastRow < 1 || lastColumn < 1) { Logger.log('退職休職: データがありません'); return 0; }
+    var data = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+
+    var normalize = function (s) { return s == null ? '' : s.toString().replace(/[\s　]/g, ''); };
+    var CM = OFFBOARD_CONFIG.COLUMN_MAPPING;
+
+    // ヘッダー行検出（「Jiraチケット管理番号」を含む行）
+    var headerRow = -1;
+    var col = { TICKET_NUMBER: -1, REQUEST_TYPE: -1, EMAIL: -1, LAST_DAY: -1, DEVICE: -1 };
+    for (var r = 0; r < data.length && headerRow === -1; r++) {
+        for (var c = 0; c < data[r].length; c++) {
+            if (normalize(data[r][c]) === normalize(CM.TICKET_NUMBER)) { headerRow = r; break; }
+        }
+    }
+    if (headerRow === -1) throw new Error('「Jiraチケット管理番号」ヘッダーが見つかりませんでした');
+    for (var c2 = 0; c2 < data[headerRow].length; c2++) {
+        var hv = normalize(data[headerRow][c2]);
+        if (hv === normalize(CM.TICKET_NUMBER)) col.TICKET_NUMBER = c2;
+        else if (hv === normalize(CM.REQUEST_TYPE)) col.REQUEST_TYPE = c2;
+        else if (hv === normalize(CM.EMAIL)) col.EMAIL = c2;
+        else if (hv === normalize(CM.LAST_DAY)) col.LAST_DAY = c2;
+        else if (hv === normalize(CM.DEVICE)) col.DEVICE = c2;
+    }
+    Logger.log('退職休職 ヘッダー行=' + (headerRow + 1) + ' 列: ' + JSON.stringify(col));
+    if (col.TICKET_NUMBER < 0 || col.REQUEST_TYPE < 0) {
+        throw new Error('必要な列（Jiraチケット管理番号／依頼種別）が見つかりません');
+    }
+
+    // 会社名/opskey は会社行（col C に値がある最初の行）から取得
+    var clientName = data[0][0];
+    var opskey = data[0].length > 2 ? data[0][2] : '';
+    Logger.log('退職休職 会社名=' + clientName + ' / opskey=' + opskey);
+
+    var titleBase = (clientName ? clientName.toString() : '') + OFFBOARD_CONFIG.TITLE_SUFFIX;
+    var createdCount = 0;
+
+    for (var i = headerRow + 1; i < data.length; i++) {
+        var ticketEmpty = data[i][col.TICKET_NUMBER] === null ||
+                          data[i][col.TICKET_NUMBER] === undefined ||
+                          data[i][col.TICKET_NUMBER].toString().trim().length === 0;
+        var hasRequestType = col.REQUEST_TYPE >= 0 &&
+                             data[i][col.REQUEST_TYPE] != null &&
+                             data[i][col.REQUEST_TYPE].toString().trim().length > 0;
+        if (!(ticketEmpty && hasRequestType)) continue;
+
+        var completionDate = col.LAST_DAY >= 0 ? offboardCompletionDate(data[i][col.LAST_DAY]) : null;
+
+        // この行で作成するチケット定義を組み立てる
+        var ticketSpecs = [];
+
+        // ① メールアドレスに値 → SaaS削除チケット × EMAIL_TICKET_COUNT
+        var emailVal = col.EMAIL >= 0 ? data[i][col.EMAIL] : '';
+        if (emailVal != null && emailVal.toString().trim().length > 0) {
+            for (var e2 = 0; e2 < OFFBOARD_CONFIG.EMAIL_TICKET_COUNT; e2++) {
+                ticketSpecs.push([OFFBOARD_CONFIG.EMAIL_TASK_TYPE]);
+            }
+        }
+
+        // ② デバイスに値 → デバイスチケット × 1（タスク種別を算出）
+        var deviceVal = col.DEVICE >= 0 ? data[i][col.DEVICE] : '';
+        if (deviceVal != null && deviceVal.toString().trim().length > 0) {
+            var deviceTaskTypes = computeDeviceTaskTypes(deviceVal);
+            ticketSpecs.push(deviceTaskTypes);
+        }
+
+        if (ticketSpecs.length === 0) continue; // メール・デバイスとも無ければ作成しない
+
+        var createdTickets = [];
+        try {
+            for (var t = 0; t < ticketSpecs.length; t++) {
+                var json = getOffboardIssueJson(titleBase, clientName, opskey, completionDate, ticketSpecs[t]);
+                var ret = postStoryIssue(json);
+                Logger.log('退職休職起票成功: ' + ret['key'] + ' 種別=' + JSON.stringify(ticketSpecs[t]));
+                var url = JIRA_CONFIG.BASE_URL + '/browse/' + ret['key'];
+                createdTickets.push({ key: ret['key'], url: url });
+
+                // 作成後すぐ「完了」へ遷移
+                try {
+                    transitionIssue(ret['key'], JIRA_CONFIG.DONE_TRANSITION_ID);
+                    Logger.log('「完了」へ遷移しました: ' + ret['key']);
+                } catch (te) {
+                    Logger.log('完了遷移エラー (' + ret['key'] + '): ' + te.message);
+                }
+                createdCount++;
+            }
+
+            // 全チケットのリンクをA列に即時書き戻し（重複防止）
+            writeTicketLinks(sheet, i + 1, col.TICKET_NUMBER + 1, createdTickets);
+            SpreadsheetApp.flush();
+            Logger.log('行' + (i + 1) + ' に ' + createdTickets.length + '件のチケットリンクを書き戻し');
+        } catch (error) {
+            Logger.log('退職休職起票エラー (行' + (i + 1) + '): ' + error.message);
+            // 途中まで作成できていればA列に記録して重複を防ぐ
+            if (createdTickets.length > 0) {
+                try { writeTicketLinks(sheet, i + 1, col.TICKET_NUMBER + 1, createdTickets); SpreadsheetApp.flush(); } catch (e3) {}
+            }
+        }
+    }
+    return createdCount;
+}
+
+/**
+ * デバイス欄の文字列からタスク種別（複数可）を算出。
+ *   各行の先頭トークンを見て:
+ *     「1x-…」形式（先頭数字が1）→ キッティング（PC）
+ *     「2x-…」形式（先頭数字が2）→ キッティング（Phone）
+ *     それ以外（数字-数字形式でない、または先頭数字が3以上等）→ キッティング（その他）
+ *   同じ種別は1つにまとめる。
+ */
+function computeDeviceTaskTypes(deviceCell) {
+    var text = deviceCell == null ? '' : deviceCell.toString();
+    if (text.trim() === '') return [];
+    var lines = text.split(/[\r\n]+/);
+    var set = {};
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (!line) continue;
+        var token = line.split(/[\s　]+/)[0];        // 行の先頭トークン（資産コード）
+        var m = token.match(/^(\d)\d*-\d+/);         // 数字-数字 の形
+        if (m && m[1] === '1') set['キッティング（PC）'] = true;
+        else if (m && m[1] === '2') set['キッティング（Phone）'] = true;
+        else set['キッティング（その他）'] = true;
+    }
+    var order = ['キッティング（PC）', 'キッティング（Phone）', 'キッティング（その他）'];
+    var result = [];
+    for (var k = 0; k < order.length; k++) if (set[order[k]]) result.push(order[k]);
+    return result;
+}
+
+/**
+ * 最終出社日の値を 'yyyy-MM-dd' へ。
+ *   ・Date型 → 整形
+ *   ・数値（Google Sheetsシリアル値・例 45322）→ 1899-12-30基準で日付へ変換
+ *   ・日付文字列 → パース
+ *   ・「未定」「確認中」「#VALUE!」等・空 → null（完了日を送らない）
+ */
+function offboardCompletionDate(rawValue) {
+    if (rawValue == null) return null;
+    if (isDate(rawValue)) return Utilities.formatDate(rawValue, 'JST', 'yyyy-MM-dd');
+    var s = rawValue.toString().trim();
+    if (s === '') return null;
+    if (/^\d+(\.\d+)?$/.test(s)) {                       // シリアル値
+        var serial = parseFloat(s);
+        var ms = Math.round((serial - 25569) * 86400 * 1000); // 25569 = 1899-12-30→1970-01-01
+        var d = new Date(ms);
+        if (!isNaN(d.getTime())) return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd');
+        return null;
+    }
+    var m = s.match(/(\d{4})[\/\-年](\d{1,2})[\/\-月](\d{1,2})/);
+    if (m) {
+        var dt = new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10));
+        if (!isNaN(dt.getTime())) return Utilities.formatDate(dt, 'JST', 'yyyy-MM-dd');
+    }
+    Logger.log('最終出社日「' + s + '」は日付として扱えないため完了日を送信しません');
+    return null;
+}
+
+/**
+ * 退職休職リスト用 起票JSON生成
+ *   summary / project / issuetype ＋ 企業名 ＋ opskey ＋ タスク種別 ＋ 完了日/duedate
+ */
+function getOffboardIssueJson(summary, clientName, opskey, completionDate, taskTypeValues) {
+    var fields = {
+        "summary": summary,
+        "project":   { "key": JIRA_CONFIG.PROJECT_NAME },
+        "issuetype": { "id": JIRA_CONFIG.ISSUE_TYPE_STORY }
+    };
+    if (clientName) fields[CUSTOM_FIELDS.CLIENT_NAME] = clientName.toString();
+    if (opskey)     fields[CUSTOM_FIELDS.OPSKEY] = opskey.toString();
+    if (taskTypeValues && taskTypeValues.length > 0) {
+        fields[CUSTOM_FIELDS.TASK_TYPE] = taskTypeValues.map(function (v) { return { "value": v }; });
+    }
+    if (completionDate) {
+        fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
+        fields["duedate"] = completionDate;
+    }
+    return JSON.stringify({ "update": {}, "fields": fields });
+}
+
+/**
+ * 作成した1〜複数チケットのリンクをセルへ書き戻す。
+ *   1件 → HYPERLINK関数 / 複数 → リッチテキスト（改行区切りで各キーにリンク）
+ */
+function writeTicketLinks(sheet, row, column, tickets) {
+    if (!tickets || tickets.length === 0) return;
+    var cell = sheet.getRange(row, column);
+    if (tickets.length === 1) {
+        cell.setFormula('=HYPERLINK("' + tickets[0].url + '","' + tickets[0].key + '")');
+        return;
+    }
+    var richText = SpreadsheetApp.newRichTextValue();
+    var fullText = '', parts = [];
+    for (var k = 0; k < tickets.length; k++) {
+        if (k > 0) fullText += '\n';
+        var start = fullText.length;
+        fullText += tickets[k].key;
+        parts.push({ start: start, end: fullText.length, url: tickets[k].url });
+    }
+    richText.setText(fullText);
+    for (var p = 0; p < parts.length; p++) richText.setLinkUrl(parts[p].start, parts[p].end, parts[p].url);
+    cell.setRichTextValue(richText.build());
+    cell.setWrap(true);
+}
+
 /**
  * リプレイス依頼用 Story起票JSON生成
  * 依頼種別/PC種別は送信しない。
@@ -1190,4 +1449,35 @@ function testLeaseUpIssue() {
   leaseUpRequest(TEST_SHEET_ID, '');
 
   Logger.log('=== リースアップ返却テスト終了 ===');
+}
+
+/**
+ * 退職休職リスト テスト
+ * 使い方:
+ *  1) 下の TEST_SHEET_ID に対象スプレッドシートのIDを入力
+ *  2) 関数プルダウンで「testOffboardIssue」を選び「実行」
+ *  3) 実行ログで結果を確認
+ *
+ * ⚠️ 1行につき最大3チケット作成され、各チケットは作成後すぐ「完了」へ遷移します。
+ *    Jiraチケット管理番号(A列)が空 かつ 依頼種別(F列)に値がある行が対象です
+ *    （テストは対象を1行だけに絞ると安全）。
+ */
+function testOffboardIssue() {
+  // ↓↓↓ ここに入力してください ↓↓↓
+  var TEST_SHEET_ID = '';  // スプレッドシートのID（URLの /d/【ここ】/edit 部分）
+  // ↑↑↑ ここに入力してください ↑↑↑
+
+  if (!TEST_SHEET_ID) {
+    Logger.log('【設定待ち】TEST_SHEET_ID を入力してから実行してください。');
+    return;
+  }
+
+  Logger.log('=== 退職休職リスト テスト開始 ===');
+  Logger.log('対象シート名: ' + OFFBOARD_CONFIG.REQUEST_SHEET_NAME);
+  Logger.log('対象スプレッドシートID: ' + TEST_SHEET_ID);
+
+  // targetSheetName を省略 → 既定の「退職休職リスト」が使われる
+  offboardRequest(TEST_SHEET_ID, '');
+
+  Logger.log('=== 退職休職リスト テスト終了 ===');
 }
