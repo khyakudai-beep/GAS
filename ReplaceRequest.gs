@@ -1095,7 +1095,11 @@ function formatDateOrNull(rawValue) {
 /**
  * 退職休職リスト 起票エントリポイント
  */
-function offboardRequest(sheetId, sheetURL, targetSheetName) {
+/**
+ * @param {number} maxRows 起票対象とする行の上限件数（先頭から数えて条件に合致した行）。
+ *                         0 / 未指定 なら全件。テスト時に「先頭N件だけ」に絞る用途。
+ */
+function offboardRequest(sheetId, sheetURL, targetSheetName, maxRows) {
     targetSheetName = targetSheetName || OFFBOARD_CONFIG.REQUEST_SHEET_NAME;
     try {
         var spreadsheet = SpreadsheetApp.openById(sheetId);
@@ -1104,7 +1108,7 @@ function offboardRequest(sheetId, sheetURL, targetSheetName) {
             console.log('対象シートが見つかりません: ' + targetSheetName);
             return;
         }
-        var created = createOffboardStories(sheet);
+        var created = createOffboardStories(sheet, maxRows);
         if (created > 0) {
             console.log('退職休職: ' + created + '件のチケットを作成しました。');
         } else {
@@ -1116,7 +1120,8 @@ function offboardRequest(sheetId, sheetURL, targetSheetName) {
     }
 }
 
-function createOffboardStories(sheet) {
+function createOffboardStories(sheet, maxRows) {
+    var rowLimit = (maxRows && maxRows > 0) ? maxRows : 0;   // 0 = 無制限
     var lastRow = sheet.getLastRow();
     var lastColumn = sheet.getLastColumn();
     if (lastRow < 1 || lastColumn < 1) { Logger.log('退職休職: データがありません'); return 0; }
@@ -1154,6 +1159,8 @@ function createOffboardStories(sheet) {
 
     var titleBase = (clientName ? clientName.toString() : '') + OFFBOARD_CONFIG.TITLE_SUFFIX;
     var createdCount = 0;
+    var processedRows = 0;   // 起票対象として処理した行数（maxRows判定用）
+    if (rowLimit > 0) Logger.log('退職休職: 実行行数の上限 = ' + rowLimit + ' 件');
 
     for (var i = headerRow + 1; i < data.length; i++) {
         var ticketEmpty = data[i][col.TICKET_NUMBER] === null ||
@@ -1185,6 +1192,13 @@ function createOffboardStories(sheet) {
         }
 
         if (ticketSpecs.length === 0) continue; // メール・デバイスとも無ければ作成しない
+
+        // 実行行数の上限に達していたら以降は処理しない
+        if (rowLimit > 0 && processedRows >= rowLimit) {
+            Logger.log('実行行数の上限(' + rowLimit + '件)に達したため処理を終了します');
+            break;
+        }
+        processedRows++;
 
         var createdTickets = [];
         try {
@@ -1467,6 +1481,7 @@ function testLeaseUpIssue() {
 function testOffboardIssue() {
   // ↓↓↓ ここに入力してください ↓↓↓
   var TEST_SHEET_ID = '';  // スプレッドシートのID（URLの /d/【ここ】/edit 部分）
+  var MAX_ROWS = 1;        // 起票対象とする行の上限（先頭からN件）。全件処理は 0 にする
   // ↑↑↑ ここに入力してください ↑↑↑
 
   if (!TEST_SHEET_ID) {
@@ -1477,9 +1492,10 @@ function testOffboardIssue() {
   Logger.log('=== 退職休職リスト テスト開始 ===');
   Logger.log('対象シート名: ' + OFFBOARD_CONFIG.REQUEST_SHEET_NAME);
   Logger.log('対象スプレッドシートID: ' + TEST_SHEET_ID);
+  Logger.log('実行行数の上限: ' + (MAX_ROWS > 0 ? MAX_ROWS + '件' : '無制限'));
 
   // targetSheetName を省略 → 既定の「退職休職リスト」が使われる
-  offboardRequest(TEST_SHEET_ID, '');
+  offboardRequest(TEST_SHEET_ID, '', '', MAX_ROWS);
 
   Logger.log('=== 退職休職リスト テスト終了 ===');
 }
