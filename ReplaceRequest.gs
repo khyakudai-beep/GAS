@@ -108,6 +108,12 @@ const OFFBOARD_CONFIG = {
   }
 };
 
+// チケット削除処理 設定
+const DELETE_CONFIG = {
+  TICKET_COLUMN_NAME: 'Jiraチケット管理番号', // キーを探す列（正規化マッチ）
+  DELETE_SUBTASKS: true                        // サブタスクごと削除する
+};
+
 // =============================================================================
 // システム変数 - 通常は変更不要
 // =============================================================================
@@ -1216,29 +1222,25 @@ function createOffboardStories(sheet) {
 
 /**
  * デバイス欄の文字列からタスク種別（複数可）を算出。
- *   各行の先頭トークンを見て:
- *     「1x-…」形式（先頭数字が1）→ キッティング（PC）
- *     「2x-…」形式（先頭数字が2）→ キッティング（Phone）
- *     それ以外（数字-数字形式でない、または先頭数字が3以上等）→ キッティング（その他）
- *   同じ種別は1つにまとめる。
+ *   ・「受領」は常に固定で付与。
+ *   ・各行の先頭トークンが「1x-…」形式（先頭数字1＝PC）または
+ *     「2x-…」形式（先頭数字2＝Phone）を1つでも含む場合は「初期化」も付与。
+ *   （それ以外＝数字-数字形式でないもの／本社入館カード等では初期化は付けない）
  */
 function computeDeviceTaskTypes(deviceCell) {
     var text = deviceCell == null ? '' : deviceCell.toString();
     if (text.trim() === '') return [];
     var lines = text.split(/[\r\n]+/);
-    var set = {};
+    var hasPcOrPhone = false;
     for (var i = 0; i < lines.length; i++) {
         var line = lines[i].trim();
         if (!line) continue;
         var token = line.split(/[\s　]+/)[0];        // 行の先頭トークン（資産コード）
         var m = token.match(/^(\d)\d*-\d+/);         // 数字-数字 の形
-        if (m && m[1] === '1') set['キッティング（PC）'] = true;
-        else if (m && m[1] === '2') set['キッティング（Phone）'] = true;
-        else set['キッティング（その他）'] = true;
+        if (m && (m[1] === '1' || m[1] === '2')) { hasPcOrPhone = true; break; }
     }
-    var order = ['キッティング（PC）', 'キッティング（Phone）', 'キッティング（その他）'];
-    var result = [];
-    for (var k = 0; k < order.length; k++) if (set[order[k]]) result.push(order[k]);
+    var result = ['受領'];                            // 受領は固定
+    if (hasPcOrPhone) result.push('初期化');          // 1x-/2x- があれば初期化
     return result;
 }
 
