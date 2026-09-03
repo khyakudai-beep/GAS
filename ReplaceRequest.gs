@@ -83,6 +83,9 @@ const LEASEUP_CONFIG = {
   // タイトルはリプレイス用タイトルの「リプレイス」を「リースアップ返却」に置換したもの
   TICKET_TITLE: '株式会社GA technologies:リースアップ返却依頼',
   TASK_TYPE_VALUES: ['受領', '初期化', '発送のみ'],           // customfield_15004 へ固定で入れる値
+  // 企業名(14986)/opskey(14987) はシートにセルが無いため固定値で送信（要確認）
+  CLIENT_NAME: '株式会社GA technologies',
+  OPSKEY: 'ga-tech',
   COLUMN_MAPPING: {
     TICKET_NUMBER: 'Jiraチケット管理番号',  // A列：起票トリガー（空の行が対象）＆リンク出力先
     ASSET: 'josys取得',                     // B列：資産（空白行の誤起票防止判定に使用）
@@ -1021,14 +1024,19 @@ function getLeaseUpIssueJson(summary, completionDate) {
         "summary": summary,
         "project":   { "key": JIRA_CONFIG.PROJECT_NAME },
         "issuetype": { "id": JIRA_CONFIG.ISSUE_TYPE_STORY },
+        // 企業名(14986)/Opskey(14987)：固定値
+        [CUSTOM_FIELDS.CLIENT_NAME]: LEASEUP_CONFIG.CLIENT_NAME,
+        [CUSTOM_FIELDS.OPSKEY]:      LEASEUP_CONFIG.OPSKEY,
         // タスク種別（Checkboxes）：受領・初期化・発送のみ（固定）
         [CUSTOM_FIELDS.TASK_TYPE]: LEASEUP_CONFIG.TASK_TYPE_VALUES.map(function (v) {
             return { "value": v };
         })
     };
-    // 完了日（customfield_14981・日付）。date列が空/解釈不能なら送らない
+    // 完了日（customfield_14981・日付）と duedate に date の値を出力。
+    // date列が空/解釈不能なら両方とも送らない。
     if (completionDate) {
         fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
+        fields["duedate"] = completionDate;
     }
     return JSON.stringify({ "update": {}, "fields": fields });
 }
