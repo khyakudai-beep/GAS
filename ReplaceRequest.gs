@@ -1338,8 +1338,11 @@ function writeTicketLinks(sheet, row, column, tickets) {
  * 依頼種別/PC種別は送信しない。
  * 企業名(14986)/Opskey(14987)/新端末の発送日(14981・duedateにも同値)を設定。
  */
-function getStoryIssueJson(summary, description, dueDate, clientName, customFieldValue, shippingDate, assigneeAccountId) {
+function getStoryIssueJson(summary, description, dueDate, clientName, customFieldValue, shippingDate, assigneeAccountId, taskTypeValues) {
     Logger.log("設定するクライアントネームは" + clientName)
+
+    // タスク種別：未指定なら通常リプレイスの固定値「キッティング（PC）」
+    var taskTypes = (taskTypeValues && taskTypeValues.length > 0) ? taskTypeValues : [REPLACE_CONFIG.TASK_TYPE_VALUE];
 
     json = {
         "update": {},
@@ -1356,8 +1359,8 @@ function getStoryIssueJson(summary, description, dueDate, clientName, customFiel
             [CUSTOM_FIELDS.CLIENT_NAME]: clientName,          // クライアント名
             [CUSTOM_FIELDS.OPSKEY]: customFieldValue,         // opskey（C1の値）
             [CUSTOM_FIELDS.SHIPPING_DATE]: shippingDate,      // 新端末の発送日
-            // タスク種別（Checkboxes型）：リプレイス依頼は固定で「キッティング（PC）」
-            [CUSTOM_FIELDS.TASK_TYPE]: [{ "value": REPLACE_CONFIG.TASK_TYPE_VALUE }]
+            // タスク種別（Checkboxes型）
+            [CUSTOM_FIELDS.TASK_TYPE]: taskTypes.map(function (v) { return { "value": v }; })
         }
     }
 
@@ -1369,6 +1372,91 @@ function getStoryIssueJson(summary, description, dueDate, clientName, customFiel
     }
 
     return JSON.stringify(json);
+}
+
+// =============================================================================
+// 【一時処理】リプレイス用: 起票済み行への追加チケット作成
+//   既に「Jiraチケット管理番号」にキー（例 JOM-1234）が出力されている行に対し、
+//   タスク種別=[受領, 初期化] のチケットを1件だけ追加作成する。
+//   その他の値（タイトル/description/企業名/opskey/発送日=14981/duedate/担当者/
+//   発送日<実行日なら完了へ遷移）は通常のリプレイス起票と同じロジックを使用する。
+//   ※一時的な処理。シートへの書き戻しは行わない（同じ行を再実行すると重複作成される
+//     ため、maxRows で件数を絞って実行すること）。用が済んだらこの関数ごと削除してよい。
+// =============================================================================
+function replaceAddReceiveInitTickets(sheetId, sheetURL, targetSheetName, maxRows) {
+    targetSheetName = targetSheetName || SHEET_CONFIG.REQUEST_SHEET_NAME;
+    var rowLimit = (maxRows && maxRows > 0) ? maxRows : 0;   // 0 = 無制限
+    var ADDITIONAL_TASK_TYPES = ['受領', '初期化'];
+
+    try {
+        var ss = SpreadsheetApp.openById(sheetId);
+        var sheet = ss.getSheetByName(targetSheetName);
+        if (!sheet) { console.log('対象シートが見つかりません: ' + targetSheetName); return; }
+
+        // 通常フローと同じ担当者マップを読み込む
+        loadMemberAccountMap();
+        loadCompanyAssigneeMap();
+
+        var headerMapping = getHeaderMapping(sheet, HEADER_CONFIG.KEY_COLUMN, HEADER_CONFIG.KEY_VALUE);
+        var columnIndexes = getColumnIndexes(headerMapping);
+        var lastColumn = sheet.getLastColumn();
+        var data = sheet.getRange(1, 1, sheet.getLastRow(), lastColumn).getValues();
+
+        var clientName = data[0][0];   // A1: クライアント名
+        var opskey = data[0][2];       // C1: opskey
+        var assigneeAccountId = getAssigneeAccountId(opskey);
+        var summary = REPLACE_CONFIG.TICKET_TITLE;
+        var todayStr = Utilities.formatDate(new Date(), 'JST', 'yyyy-MM-dd');
+
+        if (columnIndexes.TICKET_NUMBER < 0) throw new Error('「Jiraチケット管理番号」列が見つかりません');
+        if (rowLimit > 0) Logger.log('【一時処理】実行行数の上限 = ' + rowLimit + ' 件');
+
+        var createdCount = 0, processedRows = 0;
+        for (var i = headerMapping.headerRow; i < data.length; i++) {
+            // 対象条件：チケット番号セルに Jiraキーが出力済み（"-"・空は対象外）
+            var cellVal = data[i][columnIndexes.TICKET_NUMBER];
+            var hasKey = cellVal != null && /[A-Z][A-Z0-9]*-\d+/.test(cellVal.toString());
+            if (!hasKey) continue;
+
+            if (rowLimit > 0 && processedRows >= rowLimit) {
+                Logger.log('実行行数の上限(' + rowLimit + '件)に達したため終了します');
+                break;
+            }
+            processedRows++;
+
+            // 発送日 → 完了日(14981)/duedate（通常フローと同じ解決ロジック）
+            var shippingDateValue = columnIndexes.SHIPPING_DATE >= 0 ? data[i][columnIndexes.SHIPPING_DATE] : null;
+            var shippingDate = (shippingDateValue && isDate(shippingDateValue))
+                ? Utilities.formatDate(shippingDateValue, 'JST', 'yyyy-MM-dd')
+                : Utilities.formatDate(new Date(), 'JST', 'yyyy-MM-dd');
+            var dueDate = shippingDate;
+
+            var description = createDescription(i, data, sheetURL, headerMapping);
+
+            try {
+                var json = getStoryIssueJson(summary, description, dueDate, clientName, opskey, shippingDate, assigneeAccountId, ADDITIONAL_TASK_TYPES);
+                var ret = postStoryIssue(json);
+                Logger.log('【一時処理】追加チケット作成成功: ' + ret['key'] + ' (行' + (i + 1) + ' 既存=' + cellVal + ')');
+
+                // 発送日が実行日より前なら「完了」へ遷移（通常フローと同じ）
+                if (shippingDate < todayStr) {
+                    try {
+                        transitionIssue(ret['key'], JIRA_CONFIG.DONE_TRANSITION_ID);
+                        Logger.log('「完了」へ遷移しました: ' + ret['key']);
+                    } catch (te) {
+                        Logger.log('完了遷移エラー (' + ret['key'] + '): ' + te.message);
+                    }
+                }
+                createdCount++;
+            } catch (error) {
+                Logger.log('【一時処理】追加チケット作成エラー (行' + (i + 1) + '): ' + error.message);
+            }
+        }
+        console.log('【一時処理】追加チケットを ' + createdCount + ' 件作成しました（シートへの書き戻しなし）。');
+    } catch (e) {
+        console.log('システムエラーを検知しました。');
+        console.log('エラー内容：' + e.message);
+    }
 }
 
 // =============================================================================
@@ -1498,4 +1586,33 @@ function testOffboardIssue() {
   offboardRequest(TEST_SHEET_ID, '', '', MAX_ROWS);
 
   Logger.log('=== 退職休職リスト テスト終了 ===');
+}
+
+/**
+ * 【一時処理】リプレイス用: 起票済み行への追加チケット（受領/初期化）テスト
+ *  1) TEST_SHEET_ID に対象スプレッドシートIDを入力
+ *  2) 関数プルダウンで「testReplaceAddReceiveInit」を選び「実行」
+ *
+ * ⚠️ 既にJiraチケット管理番号にキーがある行へ、受領/初期化チケットを追加作成します。
+ *    シートへの書き戻しは行わないため、再実行すると重複作成されます。
+ *    まず MAX_ROWS=1 で1件だけ試してください。
+ */
+function testReplaceAddReceiveInit() {
+  // ↓↓↓ ここに入力してください ↓↓↓
+  var TEST_SHEET_ID = '';  // スプレッドシートのID（URLの /d/【ここ】/edit 部分）
+  var MAX_ROWS = 1;        // 追加作成する対象行の上限（先頭からN件）。全件は 0
+  // ↑↑↑ ここに入力してください ↑↑↑
+
+  if (!TEST_SHEET_ID) {
+    Logger.log('【設定待ち】TEST_SHEET_ID を入力してから実行してください。');
+    return;
+  }
+
+  Logger.log('=== 【一時処理】リプレイス追加チケット 開始 ===');
+  Logger.log('対象シート名: ' + SHEET_CONFIG.REQUEST_SHEET_NAME);
+  Logger.log('実行行数の上限: ' + (MAX_ROWS > 0 ? MAX_ROWS + '件' : '無制限'));
+
+  replaceAddReceiveInitTickets(TEST_SHEET_ID, '', '', MAX_ROWS);
+
+  Logger.log('=== 【一時処理】リプレイス追加チケット 終了 ===');
 }
