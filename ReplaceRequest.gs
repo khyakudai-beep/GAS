@@ -1380,8 +1380,10 @@ function getStoryIssueJson(summary, description, dueDate, clientName, customFiel
 //   タスク種別=[受領, 初期化] のチケットを1件だけ追加作成する。
 //   その他の値（タイトル/description/企業名/opskey/発送日=14981/duedate/担当者/
 //   発送日<実行日なら完了へ遷移）は通常のリプレイス起票と同じロジックを使用する。
-//   ※一時的な処理。シートへの書き戻しは行わない（同じ行を再実行すると重複作成される
-//     ため、maxRows で件数を絞って実行すること）。用が済んだらこの関数ごと削除してよい。
+//   作成後、既存キーは残したまま新チケットのハイパーリンクをセルに追記する
+//   （既存キーのURLはキーから再構成）。
+//   ※一時的な処理。同じ行を再実行すると重複作成＆リンクが増え続けるため、
+//     maxRows で件数を絞って実行すること。用が済んだらこの関数ごと削除してよい。
 // =============================================================================
 function replaceAddReceiveInitTickets(sheetId, sheetURL, targetSheetName, maxRows) {
     targetSheetName = targetSheetName || SHEET_CONFIG.REQUEST_SHEET_NAME;
@@ -1447,12 +1449,24 @@ function replaceAddReceiveInitTickets(sheetId, sheetURL, targetSheetName, maxRow
                         Logger.log('完了遷移エラー (' + ret['key'] + '): ' + te.message);
                     }
                 }
+
+                // 既存キーを保持しつつ、新チケットのハイパーリンクをセルへ追記
+                var existingKeys = cellVal.toString().match(/[A-Z][A-Z0-9]*-\d+/g) || [];
+                var linkList = [];
+                for (var xk = 0; xk < existingKeys.length; xk++) {
+                    linkList.push({ key: existingKeys[xk], url: JIRA_CONFIG.BASE_URL + '/browse/' + existingKeys[xk] });
+                }
+                linkList.push({ key: ret['key'], url: JIRA_CONFIG.BASE_URL + '/browse/' + ret['key'] });
+                writeTicketLinks(sheet, i + 1, columnIndexes.TICKET_NUMBER + 1, linkList);
+                SpreadsheetApp.flush();
+                Logger.log('行' + (i + 1) + ' に追加リンクを追記: ' + ret['key']);
+
                 createdCount++;
             } catch (error) {
                 Logger.log('【一時処理】追加チケット作成エラー (行' + (i + 1) + '): ' + error.message);
             }
         }
-        console.log('【一時処理】追加チケットを ' + createdCount + ' 件作成しました（シートへの書き戻しなし）。');
+        console.log('【一時処理】追加チケットを ' + createdCount + ' 件作成し、リンクを追記しました。');
     } catch (e) {
         console.log('システムエラーを検知しました。');
         console.log('エラー内容：' + e.message);
@@ -1593,9 +1607,9 @@ function testOffboardIssue() {
  *  1) TEST_SHEET_ID に対象スプレッドシートIDを入力
  *  2) 関数プルダウンで「testReplaceAddReceiveInit」を選び「実行」
  *
- * ⚠️ 既にJiraチケット管理番号にキーがある行へ、受領/初期化チケットを追加作成します。
- *    シートへの書き戻しは行わないため、再実行すると重複作成されます。
- *    まず MAX_ROWS=1 で1件だけ試してください。
+ * ⚠️ 既にJiraチケット管理番号にキーがある行へ、受領/初期化チケットを追加作成し、
+ *    そのハイパーリンクを既存キーの後ろに追記します。
+ *    再実行すると重複作成＆リンクが増え続けるため、まず MAX_ROWS=1 で1件だけ試してください。
  */
 function testReplaceAddReceiveInit() {
   // ↓↓↓ ここに入力してください ↓↓↓
