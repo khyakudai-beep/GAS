@@ -108,6 +108,15 @@ const OFFBOARD_CONFIG = {
   }
 };
 
+// 退職休職 デバイスチケット（タスク種別に「受領」を含む）のデフォルト設定
+//   ※作成後は現行どおり「完了」へ遷移（ステータス=完了）
+const OFFBOARD_DEVICE_DEFAULTS = {
+  ASSIGNEE_ACCOUNT_ID: '712020:a4af4d14-1e4f-4696-8177-8738090bfe4b', // Yuto Shimizu (y.shimizu@josys.com)
+  RECEIVER_FIELD:     'customfield_14984',   // 受領作業者（単一ユーザー）
+  RECEIVE_TIME_FIELD: 'customfield_15007',   // 受領作業時間
+  RECEIVE_TIME_VALUE: 10                      // 受領作業時間の固定値
+};
+
 // チケット削除処理 設定
 const DELETE_CONFIG = {
   TICKET_COLUMN_NAME: 'Jiraチケット管理番号', // キーを探す列（正規化マッチ）
@@ -1289,6 +1298,7 @@ function offboardCompletionDate(rawValue) {
 /**
  * 退職休職リスト用 起票JSON生成
  *   summary / project / issuetype ＋ 企業名 ＋ opskey ＋ タスク種別 ＋ 完了日/duedate
+ *   ＋ デバイスチケット（タスク種別に「受領」を含む）は Assignee/受領作業者/受領作業時間 を既定設定
  */
 function getOffboardIssueJson(summary, clientName, opskey, completionDate, taskTypeValues) {
     var fields = {
@@ -1305,6 +1315,16 @@ function getOffboardIssueJson(summary, clientName, opskey, completionDate, taskT
         fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
         fields["duedate"] = completionDate;
     }
+
+    // デバイスチケット（タスク種別に「受領」を含む）は既定値を設定
+    //   Assignee / 受領作業者(14984) / 受領作業時間(15007)。ステータス=完了は作成後の遷移で担保。
+    var isDeviceTicket = taskTypeValues && taskTypeValues.indexOf('受領') !== -1;
+    if (isDeviceTicket) {
+        fields["assignee"] = { "accountId": OFFBOARD_DEVICE_DEFAULTS.ASSIGNEE_ACCOUNT_ID };
+        fields[OFFBOARD_DEVICE_DEFAULTS.RECEIVER_FIELD] = { "accountId": OFFBOARD_DEVICE_DEFAULTS.ASSIGNEE_ACCOUNT_ID };
+        fields[OFFBOARD_DEVICE_DEFAULTS.RECEIVE_TIME_FIELD] = OFFBOARD_DEVICE_DEFAULTS.RECEIVE_TIME_VALUE;
+    }
+
     return JSON.stringify({ "update": {}, "fields": fields });
 }
 
