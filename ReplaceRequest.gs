@@ -109,7 +109,7 @@ const OFFBOARD_CONFIG = {
 };
 
 // 退職休職 デバイスチケット（タスク種別に「受領」を含む）のデフォルト設定
-//   ※完了への自動遷移は廃止済み（ステータスは作成時のまま）
+//   ※デバイスチケットのみ作成後に「完了」へ遷移（メールSaaS削除は遷移しない）
 const OFFBOARD_DEVICE_DEFAULTS = {
   ASSIGNEE_ACCOUNT_ID: '712020:a4af4d14-1e4f-4696-8177-8738090bfe4b', // Yuto Shimizu (y.shimizu@josys.com)
   RECEIVER_FIELD:     'customfield_14984',   // 受領作業者（単一ユーザー）
@@ -1098,7 +1098,7 @@ function formatDateOrNull(rawValue) {
 //   ・完了日(14981)/duedate = 最終出社日(Q列)。45322 のようなシリアル値は日付へ変換
 //   ・企業名(14986)/opskey(14987) = シート上部の会社行から取得
 //   ・タイトル = 会社名 + 「：退職休職対応」
-//   ・作成後 : A列に全チケットのリンクを書き戻し（完了への自動遷移は廃止済み）
+//   ・作成後 : A列に全チケットのリンクを書き戻し。デバイスチケット(受領を含む)のみ「完了」へ遷移(id 51)
 // =============================================================================
 
 /**
@@ -1217,6 +1217,17 @@ function createOffboardStories(sheet, maxRows) {
                 Logger.log('退職休職起票成功: ' + ret['key'] + ' 種別=' + JSON.stringify(ticketSpecs[t]));
                 var url = JIRA_CONFIG.BASE_URL + '/browse/' + ret['key'];
                 createdTickets.push({ key: ret['key'], url: url });
+
+                // デバイスチケット（タスク種別に「受領」を含む）のみ、作成後すぐ「完了」へ遷移
+                //   ※メール由来のSaaS削除チケットは遷移しない
+                if (ticketSpecs[t].indexOf('受領') !== -1) {
+                    try {
+                        transitionIssue(ret['key'], JIRA_CONFIG.DONE_TRANSITION_ID);
+                        Logger.log('デバイスチケットを「完了」へ遷移しました: ' + ret['key']);
+                    } catch (te) {
+                        Logger.log('完了遷移エラー (' + ret['key'] + '): ' + te.message);
+                    }
+                }
                 createdCount++;
             }
 
@@ -1309,7 +1320,7 @@ function getOffboardIssueJson(summary, clientName, opskey, completionDate, taskT
     }
 
     // デバイスチケット（タスク種別に「受領」を含む）は既定値を設定
-    //   Assignee / 受領作業者(14984) / 受領作業時間(15007)。（完了への自動遷移は廃止済み）
+    //   Assignee / 受領作業者(14984) / 受領作業時間(15007)。完了への遷移は作成側で実施。
     var isDeviceTicket = taskTypeValues && taskTypeValues.indexOf('受領') !== -1;
     if (isDeviceTicket) {
         fields["assignee"] = { "accountId": OFFBOARD_DEVICE_DEFAULTS.ASSIGNEE_ACCOUNT_ID };
