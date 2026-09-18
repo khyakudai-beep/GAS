@@ -97,13 +97,14 @@ const LEASEUP_CONFIG = {
 const OFFBOARD_CONFIG = {
   REQUEST_SHEET_NAME: '退職休職リスト',       // 対象シート名
   TITLE_SUFFIX: '：退職休職対応',             // タイトル = 会社名 + この接尾辞（固定）
+  SAME_DAY_TITLE_SUFFIX: '(当日)',           // 当日SaaS削除チケットの件名末尾に付与
   EMAIL_TASK_TYPE: 'SaaS削除',               // メールアドレス由来チケットのタスク種別
-  EMAIL_TICKET_COUNT: 2,                     // メールアドレスに値があれば作成する枚数
   COLUMN_MAPPING: {
     TICKET_NUMBER: 'Jiraチケット管理番号',  // A列：起票トリガー（空）＆リンク出力先
     REQUEST_TYPE: '依頼種別',               // F列：起票トリガー（値あり）
-    EMAIL: 'ﾒｰﾙｱﾄﾞﾚｽ',                       // J列：値あり→SaaS削除チケット×2
-    LAST_DAY: '最終出社日',                  // Q列：完了日(14981)/duedate（シリアル値変換）
+    EMAIL: 'ﾒｰﾙｱﾄﾞﾚｽ',                       // J列：値あり→SaaS削除チケット×2（普通＋当日）
+    LAST_DAY: '最終出社日',                  // Q列：普通SaaS削除の期日＆デバイス完了日/期日
+    ACCOUNT_STOP: 'ｱｶｳﾝﾄ停止日',             // R列：当日SaaS削除チケットの期日(duedate)
     DEVICE: 'ﾃﾞﾊﾞｲｽ'                         // W列：値あり→デバイスチケット×1（種別算出）
   }
 };
@@ -1141,7 +1142,7 @@ function createOffboardStories(sheet, maxRows) {
 
     // ヘッダー行検出（「Jiraチケット管理番号」を含む行）
     var headerRow = -1;
-    var col = { TICKET_NUMBER: -1, REQUEST_TYPE: -1, EMAIL: -1, LAST_DAY: -1, DEVICE: -1 };
+    var col = { TICKET_NUMBER: -1, REQUEST_TYPE: -1, EMAIL: -1, LAST_DAY: -1, ACCOUNT_STOP: -1, DEVICE: -1 };
     for (var r = 0; r < data.length && headerRow === -1; r++) {
         for (var c = 0; c < data[r].length; c++) {
             if (normalize(data[r][c]) === normalize(CM.TICKET_NUMBER)) { headerRow = r; break; }
@@ -1154,6 +1155,7 @@ function createOffboardStories(sheet, maxRows) {
         else if (hv === normalize(CM.REQUEST_TYPE)) col.REQUEST_TYPE = c2;
         else if (hv === normalize(CM.EMAIL)) col.EMAIL = c2;
         else if (hv === normalize(CM.LAST_DAY)) col.LAST_DAY = c2;
+        else if (hv === normalize(CM.ACCOUNT_STOP)) col.ACCOUNT_STOP = c2;
         else if (hv === normalize(CM.DEVICE)) col.DEVICE = c2;
     }
     Logger.log('退職休職 ヘッダー行=' + (headerRow + 1) + ' 列: ' + JSON.stringify(col));
@@ -1180,24 +1182,25 @@ function createOffboardStories(sheet, maxRows) {
                              data[i][col.REQUEST_TYPE].toString().trim().length > 0;
         if (!(ticketEmpty && hasRequestType)) continue;
 
-        var completionDate = col.LAST_DAY >= 0 ? offboardCompletionDate(data[i][col.LAST_DAY]) : null;
+        var lastDay     = col.LAST_DAY     >= 0 ? offboardCompletionDate(data[i][col.LAST_DAY])     : null; // 最終出社日
+        var accountStop = col.ACCOUNT_STOP >= 0 ? offboardCompletionDate(data[i][col.ACCOUNT_STOP]) : null; // アカウント停止日
 
-        // この行で作成するチケット定義を組み立てる
+        // この行で作成するチケット定義（{summary, taskTypes, dueDate, completionDate}）
         var ticketSpecs = [];
 
-        // ① メールアドレスに値 → SaaS削除チケット × EMAIL_TICKET_COUNT
+        // ① メールアドレスに値 → SaaS削除チケット×2（普通＋当日）。完了日は送らず期日(duedate)のみ設定。
         var emailVal = col.EMAIL >= 0 ? data[i][col.EMAIL] : '';
         if (emailVal != null && emailVal.toString().trim().length > 0) {
-            for (var e2 = 0; e2 < OFFBOARD_CONFIG.EMAIL_TICKET_COUNT; e2++) {
-                ticketSpecs.push([OFFBOARD_CONFIG.EMAIL_TASK_TYPE]);
-            }
+            // 普通：件名そのまま／期日=最終出社日
+            ticketSpecs.push({ summary: titleBase, taskTypes: [OFFBOARD_CONFIG.EMAIL_TASK_TYPE], dueDate: lastDay, completionDate: null });
+            // 当日：件名に「(当日)」／期日=アカウント停止日
+            ticketSpecs.push({ summary: titleBase + OFFBOARD_CONFIG.SAME_DAY_TITLE_SUFFIX, taskTypes: [OFFBOARD_CONFIG.EMAIL_TASK_TYPE], dueDate: accountStop, completionDate: null });
         }
 
-        // ② デバイスに値 → デバイスチケット × 1（タスク種別を算出）
+        // ② デバイスに値 → デバイスチケット×1（完了日・期日とも最終出社日）
         var deviceVal = col.DEVICE >= 0 ? data[i][col.DEVICE] : '';
         if (deviceVal != null && deviceVal.toString().trim().length > 0) {
-            var deviceTaskTypes = computeDeviceTaskTypes(deviceVal);
-            ticketSpecs.push(deviceTaskTypes);
+            ticketSpecs.push({ summary: titleBase, taskTypes: computeDeviceTaskTypes(deviceVal), dueDate: lastDay, completionDate: lastDay });
         }
 
         if (ticketSpecs.length === 0) continue; // メール・デバイスとも無ければ作成しない
@@ -1212,15 +1215,16 @@ function createOffboardStories(sheet, maxRows) {
         var createdTickets = [];
         try {
             for (var t = 0; t < ticketSpecs.length; t++) {
-                var json = getOffboardIssueJson(titleBase, clientName, opskey, completionDate, ticketSpecs[t]);
+                var spec = ticketSpecs[t];
+                var json = getOffboardIssueJson(spec.summary, clientName, opskey, spec.taskTypes, spec.dueDate, spec.completionDate);
                 var ret = postStoryIssue(json);
-                Logger.log('退職休職起票成功: ' + ret['key'] + ' 種別=' + JSON.stringify(ticketSpecs[t]));
+                Logger.log('退職休職起票成功: ' + ret['key'] + ' 種別=' + JSON.stringify(spec.taskTypes) + ' 期日=' + spec.dueDate + ' 件名=' + spec.summary);
                 var url = JIRA_CONFIG.BASE_URL + '/browse/' + ret['key'];
                 createdTickets.push({ key: ret['key'], url: url });
 
                 // デバイスチケット（タスク種別に「受領」を含む）のみ、作成後すぐ「完了」へ遷移
                 //   ※メール由来のSaaS削除チケットは遷移しない
-                if (ticketSpecs[t].indexOf('受領') !== -1) {
+                if (spec.taskTypes.indexOf('受領') !== -1) {
                     try {
                         transitionIssue(ret['key'], JIRA_CONFIG.DONE_TRANSITION_ID);
                         Logger.log('デバイスチケットを「完了」へ遷移しました: ' + ret['key']);
@@ -1300,10 +1304,13 @@ function offboardCompletionDate(rawValue) {
 
 /**
  * 退職休職リスト用 起票JSON生成
- *   summary / project / issuetype ＋ 企業名 ＋ opskey ＋ タスク種別 ＋ 完了日/duedate
+ *   summary / project / issuetype ＋ 企業名 ＋ opskey ＋ タスク種別
+ *   ＋ duedate（期日）と 完了日(14981) は個別指定（null なら送らない）
  *   ＋ デバイスチケット（タスク種別に「受領」を含む）は Assignee/受領作業者/受領作業時間 を既定設定
+ *   @param {string} dueDate        JSM期日(yyyy-MM-dd)。null/未指定なら送らない
+ *   @param {string} completionDate 完了日(14981, yyyy-MM-dd)。null/未指定なら送らない
  */
-function getOffboardIssueJson(summary, clientName, opskey, completionDate, taskTypeValues) {
+function getOffboardIssueJson(summary, clientName, opskey, taskTypeValues, dueDate, completionDate) {
     var fields = {
         "summary": summary,
         "project":   { "key": JIRA_CONFIG.PROJECT_NAME },
@@ -1314,10 +1321,8 @@ function getOffboardIssueJson(summary, clientName, opskey, completionDate, taskT
     if (taskTypeValues && taskTypeValues.length > 0) {
         fields[CUSTOM_FIELDS.TASK_TYPE] = taskTypeValues.map(function (v) { return { "value": v }; });
     }
-    if (completionDate) {
-        fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
-        fields["duedate"] = completionDate;
-    }
+    if (completionDate) fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
+    if (dueDate)        fields["duedate"] = dueDate;
 
     // デバイスチケット（タスク種別に「受領」を含む）は既定値を設定
     //   Assignee / 受領作業者(14984) / 受領作業時間(15007)。完了への遷移は作成側で実施。
