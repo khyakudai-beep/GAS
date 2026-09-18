@@ -1192,15 +1192,15 @@ function createOffboardStories(sheet, maxRows) {
         var emailVal = col.EMAIL >= 0 ? data[i][col.EMAIL] : '';
         if (emailVal != null && emailVal.toString().trim().length > 0) {
             // 普通：件名そのまま／期日=最終出社日
-            ticketSpecs.push({ summary: titleBase, taskTypes: [OFFBOARD_CONFIG.EMAIL_TASK_TYPE], dueDate: lastDay, completionDate: null });
+            ticketSpecs.push({ summary: titleBase, taskTypes: [OFFBOARD_CONFIG.EMAIL_TASK_TYPE], dueDate: lastDay });
             // 当日：件名に「(当日)」／期日=アカウント停止日
-            ticketSpecs.push({ summary: titleBase + OFFBOARD_CONFIG.SAME_DAY_TITLE_SUFFIX, taskTypes: [OFFBOARD_CONFIG.EMAIL_TASK_TYPE], dueDate: accountStop, completionDate: null });
+            ticketSpecs.push({ summary: titleBase + OFFBOARD_CONFIG.SAME_DAY_TITLE_SUFFIX, taskTypes: [OFFBOARD_CONFIG.EMAIL_TASK_TYPE], dueDate: accountStop });
         }
 
-        // ② デバイスに値 → デバイスチケット×1（完了日・期日とも最終出社日）
+        // ② デバイスに値 → デバイスチケット×1（期日=最終出社日。完了日は出力しない）
         var deviceVal = col.DEVICE >= 0 ? data[i][col.DEVICE] : '';
         if (deviceVal != null && deviceVal.toString().trim().length > 0) {
-            ticketSpecs.push({ summary: titleBase, taskTypes: computeDeviceTaskTypes(deviceVal), dueDate: lastDay, completionDate: lastDay });
+            ticketSpecs.push({ summary: titleBase, taskTypes: computeDeviceTaskTypes(deviceVal), dueDate: lastDay });
         }
 
         if (ticketSpecs.length === 0) continue; // メール・デバイスとも無ければ作成しない
@@ -1216,7 +1216,7 @@ function createOffboardStories(sheet, maxRows) {
         try {
             for (var t = 0; t < ticketSpecs.length; t++) {
                 var spec = ticketSpecs[t];
-                var json = getOffboardIssueJson(spec.summary, clientName, opskey, spec.taskTypes, spec.dueDate, spec.completionDate);
+                var json = getOffboardIssueJson(spec.summary, clientName, opskey, spec.taskTypes, spec.dueDate);
                 var ret = postStoryIssue(json);
                 Logger.log('退職休職起票成功: ' + ret['key'] + ' 種別=' + JSON.stringify(spec.taskTypes) + ' 期日=' + spec.dueDate + ' 件名=' + spec.summary);
                 var url = JIRA_CONFIG.BASE_URL + '/browse/' + ret['key'];
@@ -1304,13 +1304,12 @@ function offboardCompletionDate(rawValue) {
 
 /**
  * 退職休職リスト用 起票JSON生成
- *   summary / project / issuetype ＋ 企業名 ＋ opskey ＋ タスク種別
- *   ＋ duedate（期日）と 完了日(14981) は個別指定（null なら送らない）
+ *   summary / project / issuetype ＋ 企業名 ＋ opskey ＋ タスク種別 ＋ duedate（期日）
+ *   ※完了日(14981)は出力しない
  *   ＋ デバイスチケット（タスク種別に「受領」を含む）は Assignee/受領作業者/受領作業時間 を既定設定
- *   @param {string} dueDate        JSM期日(yyyy-MM-dd)。null/未指定なら送らない
- *   @param {string} completionDate 完了日(14981, yyyy-MM-dd)。null/未指定なら送らない
+ *   @param {string} dueDate JSM期日(yyyy-MM-dd)。null/未指定なら送らない
  */
-function getOffboardIssueJson(summary, clientName, opskey, taskTypeValues, dueDate, completionDate) {
+function getOffboardIssueJson(summary, clientName, opskey, taskTypeValues, dueDate) {
     var fields = {
         "summary": summary,
         "project":   { "key": JIRA_CONFIG.PROJECT_NAME },
@@ -1321,8 +1320,7 @@ function getOffboardIssueJson(summary, clientName, opskey, taskTypeValues, dueDa
     if (taskTypeValues && taskTypeValues.length > 0) {
         fields[CUSTOM_FIELDS.TASK_TYPE] = taskTypeValues.map(function (v) { return { "value": v }; });
     }
-    if (completionDate) fields[CUSTOM_FIELDS.COMPLETION_DATE] = completionDate;
-    if (dueDate)        fields["duedate"] = dueDate;
+    if (dueDate) fields["duedate"] = dueDate;
 
     // デバイスチケット（タスク種別に「受領」を含む）は既定値を設定
     //   Assignee / 受領作業者(14984) / 受領作業時間(15007)。完了への遷移は作成側で実施。
