@@ -59,7 +59,7 @@ const HEADER_CONFIG = {
 
 // メンバー関連設定
 const MEMBER_CONFIG = {
-  DEFAULT_ASSIGNEE: 'Ryota Fujie',
+  DEFAULT_ASSIGNEE: 'Kazuki Hyakudai',
   // メンバー名検索用のヘッダー候補
   MEMBER_HEADER_CANDIDATES: ['members', 'member', 'name', '名前', 'メンバー'],
   // ID検索用のヘッダー候補
